@@ -50,18 +50,30 @@ public class PlaneController : MonoBehaviour
     [SerializeField] private Color engineCriticalColor = Color.orange;
     [SerializeField] private Color engineOffColor = Color.red;
 
+    [Header("Altitude Hold")]
+    [SerializeField] private float altitudeHoldStrength = 2f;       // Pull back toward the captured altitude
+    [SerializeField] private float altitudeHoldDamping = 3f;        // Damps vertical speed so the hold settles
+    [SerializeField] private float altitudeHoldPitchRelease = 0.2f; // Pitch input past this disengages the hold
+
+    [Header("Control Limits")]
+    [SerializeField] private float maxAngularSpeed = 3.5f; // rad/s cap so the plane can never tumble out of control
+    [SerializeField] private float maxLiftG = 1.2f;        // Lift ceiling as a multiple of aircraft weight
+
     private bool collidersEnabled = true; // State of the colliders
     private bool altitudeHold = false;    // Toggle for altitude hold
     private bool isLanding = false;       // Toggle for landing logic
     private bool hasFuel = true;       // Whether the plane has fuel
 
+    private float holdAltitude;           // Altitude captured when altitude hold was engaged
     private float lastAltitude;           // For glide calculation
 
     private void Awake()
     {
         rb = GetComponent<Rigidbody>();
+        rb.maxAngularVelocity = maxAngularSpeed; // Keep pitch/yaw/roll authority from ever running away
         fuel = maxFuel; // Initialize fuel to max
         lastAltitude = transform.position.y;
+        holdAltitude = transform.position.y;
     }
 
     public void HandleInputs()
@@ -108,16 +120,28 @@ public class PlaneController : MonoBehaviour
             SetCollidersEnabled(collidersEnabled);
         }
 
-        // Toggle altitude hold with J key
+        // Toggle altitude hold with J key. Capture the current altitude as the target
+        // so the hold flies to a real setpoint instead of just switching gravity off.
         if (Input.GetKeyDown(KeyCode.J))
         {
             altitudeHold = !altitudeHold;
+            if (altitudeHold)
+                holdAltitude = transform.position.y;
         }
 
-        // Toggle landing logic with K key
+        // Toggle landing logic with K key. Landing and altitude hold are mutually
+        // exclusive - engaging landing always releases the hold so the plane can descend.
         if (Input.GetKeyDown(KeyCode.K))
         {
             isLanding = !isLanding;
+            if (isLanding)
+                altitudeHold = false;
+        }
+
+        // Any deliberate pitch input releases the hold, so the pilot always wins.
+        if (altitudeHold && Mathf.Abs(pitch) > altitudeHoldPitchRelease)
+        {
+            altitudeHold = false;
         }
     }
 
@@ -161,14 +185,33 @@ public class PlaneController : MonoBehaviour
         {
             if (altitudeHold)
             {
-                // Cancel out gravity exactly
+                // Cancel out gravity exactly, then steer back toward the captured altitude.
+                // The damping term bleeds off vertical speed so the hold settles instead of
+                // locking in whatever climb/descent rate it happened to engage with.
                 rb.AddForce(Vector3.up * rb.mass * Physics.gravity.magnitude, ForceMode.Force);
+
+                float altitudeError = holdAltitude - transform.position.y;
+                float correction = altitudeError * altitudeHoldStrength
+                                   - rb.linearVelocity.y * altitudeHoldDamping;
+                rb.AddForce(Vector3.up * correction * rb.mass, ForceMode.Force);
             }
-            else if (fuel > 20f)
+            else if (fuel > 20f && !isLanding)
             {
-                rb.AddForce(Vector3.up * rb.linearVelocity.magnitude * lift); // Apply lift force only if fuel > 0
+                // Lift acts along the aircraft's OWN up axis, not world up, so pitching and
+                // rolling actually redirect the lift vector. A world-up force pinned the plane
+                // at altitude no matter how it was oriented, which made pitch feel dead and
+                // made descending impossible.
+                float airspeed = Mathf.Max(0f, GetHorizontalForwardSpeed(rb, transform));
+                float liftMagnitude = airspeed * lift;
+
+                // Keep lift to a sane multiple of the aircraft's weight so it can never
+                // overpower gravity by orders of magnitude.
+                float weight = rb.mass * Physics.gravity.magnitude;
+                liftMagnitude = Mathf.Min(liftMagnitude, weight * maxLiftG);
+
+                rb.AddForce(transform.up * liftMagnitude);
             }
-            // No lift force applied if fuel is 0
+            // No lift while out of fuel, or while landing so the plane can settle down
         }
 
         if (isLanding)
@@ -176,7 +219,14 @@ public class PlaneController : MonoBehaviour
             // Apply landing logic here, e.g., reduce throttle or apply brakes
             throttle = Mathf.Max(0f, throttle - throttleIncrement); // Gradually reduce throttle
             rb.AddForce(Vector3.down * rb.mass * Physics.gravity.magnitude, ForceMode.Force); // Apply gravity force
-            Debug.Log("Landing in progress, throttle reduced to: " + throttle);
+        }
+
+        // Hard speed cap: prevents the aircraft from exceeding a controllable velocity,
+        // which otherwise causes visual glitching (mesh popping, Cesium tile streaming
+        // falling behind, and physics jitter) at extreme speeds.
+        if (rb.linearVelocity.magnitude > maxGlideSpeed)
+        {
+            rb.linearVelocity = Vector3.ClampMagnitude(rb.linearVelocity, maxGlideSpeed);
         }
     }
 

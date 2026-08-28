@@ -2,6 +2,7 @@
   "dependencies": {
     "com.cesium.unity": "1.16.2",
     "com.unity.2d.sprite": "1.0.0",
+    "com.unity.ai.assistant": "2.18.0-pre.2",
     "com.unity.ai.navigation": "2.0.8",
     "com.unity.collab-proxy": "2.8.2",
     "com.unity.ide.rider": "3.0.36",
